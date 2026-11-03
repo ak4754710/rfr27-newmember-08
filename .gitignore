@@ -1,0 +1,12 @@
+# Altium-generated local files
+**/__Previews/
+**/History/
+**/*.PrjPcbStructure
+*.html
+
+# Altium project logs
+Project Logs*/
+
+# Archived copies are intentionally versioned
+!archive/
+!archive/**
