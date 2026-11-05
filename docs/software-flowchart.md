@@ -6,8 +6,12 @@ flowchart TD
     D --> E[Convert voltage to temperature]
     E --> F{All 8 read?}
     F -- No --> C
-    F -- Yes --> G[Find maximum temperature]
-    G --> H[Update blinking LED if maximum > 60 C]
-    H --> I[Report temperatures over I2C]
-    I --> C
+    F -- Yes --> G[Find maximum valid temperature and channel]
+    G --> H{Over 60 C or invalid channel?}
+    H -- Yes --> I[Blink fault LED]
+    H -- No --> J[Turn fault LED off]
+    I --> K[Publish 24-byte I2C packet]
+    J --> K
+    K --> L[Print periodic serial diagnostics]
+    L --> C
 ```

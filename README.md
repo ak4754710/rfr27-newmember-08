@@ -6,9 +6,9 @@ RFR temperature scanner.
 ## Current status
 
 The current hardware design is an 8-channel scanner built around a CD4051BE
-analog multiplexer. The firmware implementation is intentionally still
-minimal; the next development phase will implement the scanner on a separate
-branch.
+analog multiplexer. The firmware now implements the scanner, temperature
+conversion, fault indication, serial diagnostics, and a provisional I2C
+response; physical bring-up and calibration remain outstanding.
 
 ## Repository layout
 
@@ -29,6 +29,8 @@ Its schematic path points to
   current editable design report.
 - [`docs/software-flowchart.md`](docs/software-flowchart.md) - firmware
   planning flowchart.
+- [`docs/firmware.md`](docs/firmware.md) - firmware configuration,
+  calculations, protocol, and bring-up notes.
 
 The flowchart and [`software/firmware_outline.h`](software/firmware_outline.h)
 describe the current 8-channel scanner.
@@ -38,9 +40,9 @@ updates; the editable report is the current source document.
 
 ## Firmware
 
-[`software/firmware.ino`](software/firmware.ino) is reserved for the future
-implementation. The exact voltage-to-temperature conversion and I2C payload
-remain to be confirmed during that work.
+[`software/firmware.ino`](software/firmware.ino) implements the eight-channel
+scan, temperature conversion, fault LED, serial diagnostics, and provisional
+I2C response described in [`docs/firmware.md`](docs/firmware.md).
 
 ## Development
 
