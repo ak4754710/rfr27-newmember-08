@@ -1,7 +1,7 @@
 #ifndef FIRMWARE_OUTLINE_H
 #define FIRMWARE_OUTLINE_H
 
-#define NUM_SENSORS 8
+#define NUM_SENSORS 1
 #define TEMP_THRESHOLD 60.0f
 
 void initialize_peripherals(void);

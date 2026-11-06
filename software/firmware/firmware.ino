@@ -15,9 +15,33 @@ const uint8_t ADC_INPUT_PIN = A0;
 const uint8_t FAULT_LED_PIN = 6;
 const uint8_t I2C_ADDRESS = 0x08;
 
-const float ADC_REFERENCE_VOLTAGE = 5.0f;
-const float SENSOR_VOLTAGE_OFFSET = 2.191f;
-const float SENSOR_VOLTAGE_SLOPE = 0.2881f;
+// ADC reference = the 5 V rail (analogReference(DEFAULT)). Set this to the measured rail.
+// Everything below that depends on the rail is derived from it automatically.
+const float ADC_REFERENCE_VOLTAGE = 4.84f;
+
+// Circuit values (from the schematic / bench measurements)
+const float OPAMP_R_FEEDBACK_OHMS = 39000.0f;  // R11
+const float OPAMP_R_INPUT_OHMS    = 10000.0f;  // R12
+const float REF_DIVIDER_RATIO     = 0.5f;      // R15 / (R15 + R17), buffered 2.5 V node
+const float VPLUS_R_TOP_OHMS      = 10000.0f;  // R14, from reference node to + input
+const float VPLUS_R_BOTTOM_OHMS   = 39000.0f;  // R16, from + input to GND
+const float MUX_RON_OHMS          = 84.0f;     // measured mux on-resistance
+const float SENSOR_PULLUP_OHMS    = 680.0f;    // R2
+
+// Derived: gain, mux/pull-up ratio, and the op-amp + input voltage (scales with the rail)
+const float OPAMP_GAIN = OPAMP_R_FEEDBACK_OHMS / OPAMP_R_INPUT_OHMS;
+const float PULLUP_RATIO = MUX_RON_OHMS / SENSOR_PULLUP_OHMS;
+const float V_PLUS_VOLTAGE =
+    ADC_REFERENCE_VOLTAGE * REF_DIVIDER_RATIO *
+    (VPLUS_R_BOTTOM_OHMS / (VPLUS_R_TOP_OHMS + VPLUS_R_BOTTOM_OHMS));
+
+// Vsensor = OFFSET - SLOPE * V_A0
+//   Vc      = ((1 + G) * V+ - V_A0) / G          (undo the difference amp)
+//   Vsensor = (1 + Ron/Rpu) * Vc - (Ron/Rpu) * Vrail   (undo the mux drop)
+const float SENSOR_VOLTAGE_SLOPE = (1.0f + PULLUP_RATIO) / OPAMP_GAIN;
+const float SENSOR_VOLTAGE_OFFSET =
+    (1.0f + PULLUP_RATIO) * (1.0f + OPAMP_GAIN) * V_PLUS_VOLTAGE / OPAMP_GAIN -
+    PULLUP_RATIO * ADC_REFERENCE_VOLTAGE;
 const unsigned long MUX_SETTLING_DELAY_US = 2000UL;
 const unsigned long LED_BLINK_INTERVAL_MS = 250UL;
 const unsigned long SERIAL_REPORT_INTERVAL_MS = 500UL;
@@ -47,6 +71,8 @@ const uint8_t SENSOR_TABLE_SIZE =
     sizeof(SENSOR_TEMPERATURES_C) / sizeof(SENSOR_TEMPERATURES_C[0]);
 
 int raw_adc[NUM_SENSORS];
+float a0_voltages[NUM_SENSORS];      // voltage measured at the Arduino A0 pin
+float sensor_voltages[NUM_SENSORS];  // reconstructed sensor voltage (used for the table lookup)
 float channel_temperatures[NUM_SENSORS];
 float published_maximum = NAN;
 int published_hottest_channel = -1;
@@ -115,6 +141,9 @@ void scan_temperatures(float temperatures[NUM_SENSORS]) {
     const float V_A0 = adc_to_voltage(raw_adc[channel]);
     const float V_sensor =
         SENSOR_VOLTAGE_OFFSET - SENSOR_VOLTAGE_SLOPE * V_A0;
+
+    a0_voltages[channel] = V_A0;
+    sensor_voltages[channel] = V_sensor;
     temperatures[channel] = voltage_to_temperature(V_sensor);
   }
 }
@@ -222,6 +251,15 @@ void update_fault_led(float maximum) {
   }
 }
 
+void print_voltage(float volts) {
+  if (isfinite(volts)) {
+    Serial.print(volts, 3);
+    Serial.print(F("V"));
+  } else {
+    Serial.print(F("INVALID"));
+  }
+}
+
 void print_scan(void) {
   const bool overtemperature =
       isfinite(published_maximum) && published_maximum > TEMP_THRESHOLD;
@@ -245,11 +283,16 @@ void print_scan(void) {
   }
   Serial.println();
 
+  // Per channel: raw ADC count, A0 pin voltage, reconstructed sensor voltage, temperature
   for (int channel = 0; channel < NUM_SENSORS; ++channel) {
     Serial.print(F("  ch"));
     Serial.print(channel);
     Serial.print(F(" adc="));
     Serial.print(raw_adc[channel]);
+    Serial.print(F(" A0="));
+    print_voltage(a0_voltages[channel]);
+    Serial.print(F(" Vsensor="));
+    print_voltage(sensor_voltages[channel]);
     Serial.print(F(" temp="));
     if (isfinite(channel_temperatures[channel])) {
       Serial.print(channel_temperatures[channel], 2);
@@ -274,11 +317,21 @@ void initialize_peripherals(void) {
 
   for (int channel = 0; channel < NUM_SENSORS; ++channel) {
     raw_adc[channel] = 0;
+    a0_voltages[channel] = NAN;
+    sensor_voltages[channel] = NAN;
     channel_temperatures[channel] = NAN;
   }
   Serial.println(F("RFR 8-channel scanner"));
   Serial.println(F("Provisional pins: mux S0/S1/S2=D2/D3/D4, ADC=A0, LED=D6"));
-  Serial.println(F("Provisional model: Vsensor=2.5-(Vconditioned/3.9), Vref=5.0V"));
+  Serial.print(F("ADC ref="));
+  Serial.print(ADC_REFERENCE_VOLTAGE, 3);
+  Serial.print(F("V V+="));
+  Serial.print(V_PLUS_VOLTAGE, 3);
+  Serial.print(F("V model: Vsensor="));
+  Serial.print(SENSOR_VOLTAGE_OFFSET, 4);
+  Serial.print(F(" - "));
+  Serial.print(SENSOR_VOLTAGE_SLOPE, 4);
+  Serial.println(F("*VA0"));
   Serial.println(F("Settling=2000us, I2C=0x08, packet=24 bytes"));
 }
 
