@@ -16,8 +16,8 @@ const uint8_t FAULT_LED_PIN = 6;
 const uint8_t I2C_ADDRESS = 0x08;
 
 const float ADC_REFERENCE_VOLTAGE = 5.0f;
-const float DIFFERENTIAL_REFERENCE_VOLTAGE = 2.5f;
-const float CONDITIONING_GAIN = 3.9f;
+const float SENSOR_VOLTAGE_OFFSET = 2.191f;
+const float SENSOR_VOLTAGE_SLOPE = 0.2881f;
 const unsigned long MUX_SETTLING_DELAY_US = 2000UL;
 const unsigned long LED_BLINK_INTERVAL_MS = 250UL;
 const unsigned long SERIAL_REPORT_INTERVAL_MS = 500UL;
@@ -37,7 +37,7 @@ const float SENSOR_TEMPERATURES_C[] = {
 
 const float SENSOR_VOLTAGES_V[] = {
   2.44f, 2.42f, 2.40f, 2.38f, 2.35f, 2.32f, 2.27f, 2.23f,
-  2.17f, 2.11f, 2.00f, 1.99f, 1.92f, 1.86f, 1.80f, 1.74f,
+  2.17f, 2.11f, 2.05f, 1.99f, 1.92f, 1.86f, 1.80f, 1.74f,
   1.68f, 1.63f, 1.59f, 1.55f, 1.51f, 1.48f, 1.45f, 1.43f,
   1.40f, 1.38f, 1.37f, 1.35f, 1.34f, 1.33f, 1.32f, 1.31f,
   1.30f
@@ -112,9 +112,10 @@ void scan_temperatures(float temperatures[NUM_SENSORS]) {
     delayMicroseconds(MUX_SETTLING_DELAY_US);
     raw_adc[channel] = read_adc();
 
-    temperatures[channel] = voltage_to_temperature(
-        DIFFERENTIAL_REFERENCE_VOLTAGE -
-        adc_to_voltage(raw_adc[channel]) / CONDITIONING_GAIN);
+    const float V_A0 = adc_to_voltage(raw_adc[channel]);
+    const float V_sensor =
+        SENSOR_VOLTAGE_OFFSET - SENSOR_VOLTAGE_SLOPE * V_A0;
+    temperatures[channel] = voltage_to_temperature(V_sensor);
   }
 }
 
