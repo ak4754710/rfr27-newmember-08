@@ -77,7 +77,6 @@ float channel_temperatures[NUM_SENSORS];
 float published_maximum = NAN;
 int published_hottest_channel = -1;
 bool scan_ready = false;
-bool invalid_channel_present = false;
 uint16_t scan_sequence = 0;
 unsigned long last_led_toggle_ms = 0;
 unsigned long last_serial_report_ms = 0;
@@ -148,17 +147,6 @@ void scan_temperatures(float temperatures[NUM_SENSORS]) {
   }
 }
 
-float max_temperature(const float temperatures[NUM_SENSORS]) {
-  float maximum = NAN;
-  for (int channel = 0; channel < NUM_SENSORS; ++channel) {
-    if (isfinite(temperatures[channel]) &&
-        (!isfinite(maximum) || temperatures[channel] > maximum)) {
-      maximum = temperatures[channel];
-    }
-  }
-  return maximum;
-}
-
 int16_t encode_temperature(float temperature) {
   if (!isfinite(temperature)) {
     return UNAVAILABLE_TEMPERATURE;
@@ -183,17 +171,6 @@ void build_packet(uint8_t packet[PACKET_SIZE]) {
     packet[1] = 1;
     if (isfinite(published_maximum) && published_maximum > TEMP_THRESHOLD) {
       packet[1] |= 1 << 1;
-    }
-    if (invalid_channel_present) {
-      packet[1] |= 1 << 2;
-    }
-    if (!isfinite(published_maximum)) {
-      packet[1] |= 1 << 3;
-    }
-    for (int channel = 0; channel < NUM_SENSORS; ++channel) {
-      if (!isfinite(channel_temperatures[channel])) {
-        packet[2] |= 1 << channel;
-      }
     }
   }
 
@@ -235,8 +212,7 @@ void on_i2c_request(void) {
 
 void update_fault_led(float maximum) {
   const bool fault = scan_ready &&
-                     (invalid_channel_present ||
-                      (isfinite(maximum) && maximum > TEMP_THRESHOLD));
+                     isfinite(maximum) && maximum > TEMP_THRESHOLD;
   if (!fault) {
     led_state = false;
     digitalWrite(FAULT_LED_PIN, LOW);
@@ -269,9 +245,8 @@ void print_scan(void) {
   if (!scan_ready) {
     Serial.print(F("NOT_READY"));
   } else {
-    if (invalid_channel_present) Serial.print(F("INVALID "));
     if (overtemperature) Serial.print(F("OVERTEMP "));
-    if (!invalid_channel_present && !overtemperature) Serial.print(F("OK"));
+    if (!overtemperature) Serial.print(F("OK"));
   }
   Serial.print(F(" max="));
   if (isfinite(published_maximum)) {
@@ -279,7 +254,7 @@ void print_scan(void) {
     Serial.print(F("C ch="));
     Serial.print(published_hottest_channel);
   } else {
-    Serial.print(F("INVALID"));
+    Serial.print(F("N/A"));
   }
   Serial.println();
 
@@ -298,7 +273,7 @@ void print_scan(void) {
       Serial.print(channel_temperatures[channel], 2);
       Serial.println(F("C"));
     } else {
-      Serial.println(F("INVALID"));
+      Serial.println(F("N/A"));
     }
   }
 }
@@ -343,12 +318,12 @@ void loop(void) {
   scan_temperatures(channel_temperatures);
   published_maximum = NAN;
   published_hottest_channel = -1;
-  invalid_channel_present = false;
   for (int channel = 0; channel < NUM_SENSORS; ++channel) {
     if (!isfinite(channel_temperatures[channel])) {
-      invalid_channel_present = true;
-    } else if (!isfinite(published_maximum) ||
-               channel_temperatures[channel] > published_maximum) {
+      continue;
+    }
+    if (!isfinite(published_maximum) ||
+        channel_temperatures[channel] > published_maximum) {
       published_maximum = channel_temperatures[channel];
       published_hottest_channel = channel;
     }

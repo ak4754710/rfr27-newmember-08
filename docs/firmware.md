@@ -49,11 +49,8 @@ scan-rate guarantee.
 
 ## Fault behavior and diagnostics
 
-The maximum valid temperature and its lowest-index channel are retained.
-Exactly 60°C is not an overtemperature fault; values above 60°C are. Any
-invalid channel also activates the blinking fault LED. If all channels are
-invalid, no maximum is reported. Before the first completed scan, the LED is
-off and data is marked not ready.
+The maximum temperature and its lowest-index channel are retained. Values above 60°C activate the blinking fault LED. Before the first completed scan, the LED is off and data is marked
+not ready.
 
 The serial monitor uses 115200 baud. About every 500 ms it prints the scan
 sequence, status, maximum/channel, and each channel's raw ADC count and
@@ -70,14 +67,14 @@ master request returns exactly 24 bytes:
 | Bytes | Meaning |
 | --- | --- |
 | 0 | Protocol version, `1` |
-| 1 | Status: bit 0 data ready, bit 1 overtemperature, bit 2 invalid channel, bit 3 no valid maximum |
-| 2 | Invalid-channel bitmask, bit n is channel n |
+| 1 | Status: bit 0 data ready, bit 1 overtemperature |
+| 2 | Reserved, always zero |
 | 3 | Hottest channel, or `0xFF` when unavailable |
 | 4-5 | Scan sequence, unsigned 16-bit little-endian |
 | 6-7 | Maximum temperature, signed 16-bit hundredths of °C, little-endian |
 | 8-23 | Eight signed 16-bit hundredths-of-°C temperatures, little-endian |
 
-`INT16_MIN` (`0x8000`) means unavailable or invalid. Temperatures are rounded
+`INT16_MIN` (`0x8000`) means unavailable. Temperatures are rounded
 to the nearest hundredth before encoding. The request callback only returns
 the already-published packet; ADC work and serial output remain in the main
 loop. The packet format is provisional and must be checked against the
