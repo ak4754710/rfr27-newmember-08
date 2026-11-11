@@ -1,95 +1,52 @@
 # Firmware
 
-The firmware targets an ATmega328P Arduino Nano and continuously scans the
-eight physical channels of the CD4051BE multiplexer. The submitted schematic
-still shows the original sixteen-channel CD74HC4067, as required by the
-project leads; the assembled firmware target is the eight-channel circuit.
+The sketch targets the ATmega328P Arduino Nano. It scans the eight channels of
+the CD4051BE on the breadboard. The submitted schematic uses the original
+16-channel multiplexer.
 
-## Provisional hardware configuration
-
-The current schematic does not resolve every firmware pin assignment. The
-sketch therefore uses these documented bring-up defaults:
-
-| Function | Pin/value |
+| Function | Setting |
 | --- | --- |
 | MUX S0/S1/S2 | D2/D3/D4 |
-| MUX inhibit | Externally held LOW; not driven by firmware |
+| MUX inhibit | Held LOW externally |
 | ADC input | A0 |
-| Fault LED/MOSFET gate | D6, active HIGH |
-| ADC reference | Arduino default reference, nominally 5.0 V |
-| I2C peripheral address | `0x08` |
-| Serial | 115200 baud |
+| Fault LED | D6, active HIGH |
+| ADC reference | Arduino DEFAULT, configured as 4.84 V for the bench rail |
+| I2C peripheral address | 0x08 |
+| USB serial | 115200 baud |
 
-The D6 assignment is provisional because older schematic notes assign D6 to
-both MUX enable and LED. Verify the assembled wiring before relying on the
-fault indicator.
+## Scan and conversion
 
-## Measurement model
-
-Each channel waits 2 ms after selection, then reads the 10-bit ADC. The
-conversion uses the nominal reference and the provisional differential
-amplifier model:
+The sketch selects each channel, waits 2 ms, and takes one 10-bit ADC reading.
+Set the configured reference voltage to the measured rail used by the Nano.
 
 ```text
-Vconditioned = ADC * 5.0 / 1023
-Vsensor = 2.5 - Vconditioned / 3.9
+VA0 = ADC count × AREF / 1023
+Vdiode = 0.43824 × AREF − 0.28735 × VA0
 ```
 
-The sensor voltage is converted with piecewise-linear interpolation through
-the documented -40°C to 120°C voltage table. Values outside 1.30 V to 2.44 V
-are invalid; they are not extrapolated or clamped. The model is inferred from
-the documented endpoints and is not calibrated. Higher conditioned voltage
-means higher temperature under this model.
+The second equation comes from the design report's signal-conditioning model.
+The sketch interpolates the sensor's voltage-to-temperature table. A diode
+voltage outside 1.30–2.44 V is invalid and is skipped when finding the maximum.
+The lowest channel index wins ties. D6 blinks with a 250 ms half-period while a valid reading exceeds 60 °C.
+USB serial prints the channel number and temperature during each scan.
 
-For the intended RC values, 1 kOhm and 150 nF give a 150 us time constant and
-a cutoff near 1.06 kHz. If the assembled board uses 100 nF instead, the
-cutoff is near 1.59 kHz. The 2 ms delay is a conservative development
-assumption for the complete analog path; it is not a measured settling or
-scan-rate guarantee.
+## I2C reply
 
-## Fault behavior and diagnostics
+A controller read at address 0x08 returns four bytes.
 
-The maximum temperature and its lowest-index channel are retained. Values above 60°C activate the blinking fault LED. Before the first completed scan, the LED is off and data is marked
-not ready.
-
-The serial monitor uses 115200 baud. About every 500 ms it prints the scan
-sequence, status, maximum/channel, and each channel's raw ADC count and
-temperature. Use the Arduino IDE or Arduino CLI to select **Arduino Nano,
-ATmega328P**, upload `software/firmware.ino`, and open the serial monitor at
-115200 baud. The board and bootloader selection still need to be confirmed
-during bring-up.
-
-## I2C response
-
-The Nano is a read-only I2C peripheral at provisional address `0x08`. A
-master request returns exactly 24 bytes:
-
-| Bytes | Meaning |
+| Bytes | Field |
 | --- | --- |
-| 0 | Protocol version, `1` |
-| 1 | Status: bit 0 data ready, bit 1 overtemperature |
-| 2 | Reserved, always zero |
-| 3 | Hottest channel, or `0xFF` when unavailable |
-| 4-5 | Scan sequence, unsigned 16-bit little-endian |
-| 6-7 | Maximum temperature, signed 16-bit hundredths of °C, little-endian |
-| 8-23 | Eight signed 16-bit hundredths-of-°C temperatures, little-endian |
+| 0 | Bit 0 is set when the highest valid temperature exceeds 60 °C. Other bits are zero. |
+| 1 | Zero-based hottest channel when overtemperature is set, otherwise 0xFF. |
+| 2–3 | Highest valid temperature as signed 16-bit hundredths of a degree Celsius, little-endian. 0x8000 means unavailable. |
 
-`INT16_MIN` (`0x8000`) means unavailable. Temperatures are rounded
-to the nearest hundredth before encoding. The request callback only returns
-the already-published packet; ADC work and serial output remain in the main
-loop. The packet format is provisional and must be checked against the
-receiver's expected protocol.
+USB serial reports individual channel temperatures. The I2C controller should
+request four bytes. A read that overlaps a scan update can contain bytes from
+two consecutive scans.
 
-## Validation status
+## Bench verification
 
-The sketch was compiled with `g++ -std=c++17 -Wall -Wextra -Werror` against a
-temporary Arduino/Wire stub harness. That harness checked channel bounds, ADC
-boundary scaling, interpolation endpoints and representative points,
-out-of-range invalidation, maximum/tie handling, threshold strictness, packet
-length and byte order, the unavailable sentinel, and LED timing. The actual
-Arduino toolchain was unavailable in the development environment, so an
-ATmega328P Nano compile and upload still need to be performed.
-
-Physical validation is still required for MUX pin mapping, amplifier polarity
-and gain, ADC reference voltage, RC settling, sensor calibration, MOSFET LED
-polarity, I2C pull-ups, and receiver compatibility.
+Select Arduino Nano and the processor/bootloader option that matches the
+board. Confirm all eight mux positions, the configured reference voltage, the
+D6 LED wiring, and a four-byte read from a separate I2C controller. The project
+progress log records a bench conversion check and lists I2C as untested.

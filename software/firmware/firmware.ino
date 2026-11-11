@@ -1,55 +1,12 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <math.h>
-#include <stdint.h>
-#include <string.h>
-
-#if defined(__AVR__)
-#include <avr/interrupt.h>
-#endif
-
 #include "firmware_outline.h"
 
-const uint8_t MUX_SELECT_PINS[3] = {2, 3, 4};
-const uint8_t ADC_INPUT_PIN = A0;
-const uint8_t FAULT_LED_PIN = 6;
-const uint8_t I2C_ADDRESS = 0x08;
-
-// ADC reference = the 5 V rail (analogReference(DEFAULT)). Set this to the measured rail.
-// Everything below that depends on the rail is derived from it automatically.
-const float ADC_REFERENCE_VOLTAGE = 4.84f;
-
-// Circuit values (from the schematic / bench measurements)
-const float OPAMP_R_FEEDBACK_OHMS = 39000.0f;  // R11
-const float OPAMP_R_INPUT_OHMS    = 10000.0f;  // R12
-const float REF_DIVIDER_RATIO     = 0.5f;      // R15 / (R15 + R17), buffered 2.5 V node
-const float VPLUS_R_TOP_OHMS      = 10000.0f;  // R14, from reference node to + input
-const float VPLUS_R_BOTTOM_OHMS   = 39000.0f;  // R16, from + input to GND
-const float MUX_RON_OHMS          = 84.0f;     // measured mux on-resistance
-const float SENSOR_PULLUP_OHMS    = 680.0f;    // R2
-
-// Derived: gain, mux/pull-up ratio, and the op-amp + input voltage (scales with the rail)
-const float OPAMP_GAIN = OPAMP_R_FEEDBACK_OHMS / OPAMP_R_INPUT_OHMS;
-const float PULLUP_RATIO = MUX_RON_OHMS / SENSOR_PULLUP_OHMS;
-const float V_PLUS_VOLTAGE =
-    ADC_REFERENCE_VOLTAGE * REF_DIVIDER_RATIO *
-    (VPLUS_R_BOTTOM_OHMS / (VPLUS_R_TOP_OHMS + VPLUS_R_BOTTOM_OHMS));
-
-// Vsensor = OFFSET - SLOPE * V_A0
-//   Vc      = ((1 + G) * V+ - V_A0) / G          (undo the difference amp)
-//   Vsensor = (1 + Ron/Rpu) * Vc - (Ron/Rpu) * Vrail   (undo the mux drop)
-const float SENSOR_VOLTAGE_SLOPE = (1.0f + PULLUP_RATIO) / OPAMP_GAIN;
-const float SENSOR_VOLTAGE_OFFSET =
-    (1.0f + PULLUP_RATIO) * (1.0f + OPAMP_GAIN) * V_PLUS_VOLTAGE / OPAMP_GAIN -
-    PULLUP_RATIO * ADC_REFERENCE_VOLTAGE;
-const unsigned long MUX_SETTLING_DELAY_US = 2000UL;
-const unsigned long LED_BLINK_INTERVAL_MS = 250UL;
-const unsigned long SERIAL_REPORT_INTERVAL_MS = 500UL;
-const unsigned long SERIAL_BAUD_RATE = 115200UL;
-
-const uint8_t PACKET_SIZE = 24;
-const uint8_t PROTOCOL_VERSION = 1;
-const int16_t UNAVAILABLE_TEMPERATURE = INT16_MIN;
+const uint8_t muxPins[] = {2, 3, 4};
+const uint8_t ledPin = 6;
+const float adcReference = 4.84f;  // Measured bench rail with DEFAULT reference.
+volatile uint8_t reply[] = {0, 0xFF, 0, 0x80};
 
 const float SENSOR_TEMPERATURES_C[] = {
   -40.0f, -35.0f, -30.0f, -25.0f, -20.0f, -15.0f, -10.0f, -5.0f,
@@ -69,44 +26,6 @@ const float SENSOR_VOLTAGES_V[] = {
 
 const uint8_t SENSOR_TABLE_SIZE =
     sizeof(SENSOR_TEMPERATURES_C) / sizeof(SENSOR_TEMPERATURES_C[0]);
-
-int raw_adc[NUM_SENSORS];
-float a0_voltages[NUM_SENSORS];      // voltage measured at the Arduino A0 pin
-float sensor_voltages[NUM_SENSORS];  // reconstructed sensor voltage (used for the table lookup)
-float channel_temperatures[NUM_SENSORS];
-float published_maximum = NAN;
-int published_hottest_channel = -1;
-bool scan_ready = false;
-uint16_t scan_sequence = 0;
-unsigned long last_led_toggle_ms = 0;
-unsigned long last_serial_report_ms = 0;
-bool led_state = false;
-volatile uint8_t published_packet[PACKET_SIZE] = {};
-
-bool valid_channel(int channel) {
-  return channel >= 0 && channel < NUM_SENSORS;
-}
-
-void select_channel(int channel) {
-  if (!valid_channel(channel)) {
-    return;
-  }
-
-  for (uint8_t bit = 0; bit < 3; ++bit) {
-    digitalWrite(MUX_SELECT_PINS[bit], (channel >> bit) & 0x01);
-  }
-}
-
-int read_adc(void) {
-  return analogRead(ADC_INPUT_PIN);
-}
-
-float adc_to_voltage(int reading) {
-  if (reading < 0 || reading > 1023) {
-    return NAN;
-  }
-  return (static_cast<float>(reading) * ADC_REFERENCE_VOLTAGE) / 1023.0f;
-}
 
 float voltage_to_temperature(float voltage) {
   if (!isfinite(voltage) ||
@@ -131,211 +50,55 @@ float voltage_to_temperature(float voltage) {
   return NAN;
 }
 
-void scan_temperatures(float temperatures[NUM_SENSORS]) {
-  for (int channel = 0; channel < NUM_SENSORS; ++channel) {
-    select_channel(channel);
-    delayMicroseconds(MUX_SETTLING_DELAY_US);
-    raw_adc[channel] = read_adc();
-
-    const float V_A0 = adc_to_voltage(raw_adc[channel]);
-    const float V_sensor =
-        SENSOR_VOLTAGE_OFFSET - SENSOR_VOLTAGE_SLOPE * V_A0;
-
-    a0_voltages[channel] = V_A0;
-    sensor_voltages[channel] = V_sensor;
-    temperatures[channel] = voltage_to_temperature(V_sensor);
-  }
+void sendReply() {
+  const uint8_t packet[] = {reply[0], reply[1], reply[2], reply[3]};
+  Wire.write(packet, sizeof(packet));
 }
 
-int16_t encode_temperature(float temperature) {
-  if (!isfinite(temperature)) {
-    return UNAVAILABLE_TEMPERATURE;
+void setup() {
+  for (uint8_t pin : muxPins) {
+    pinMode(pin, OUTPUT);
   }
-  const long rounded = lroundf(temperature * 100.0f);
-  if (rounded < INT16_MIN + 1L || rounded > INT16_MAX) {
-    return UNAVAILABLE_TEMPERATURE;
-  }
-  return static_cast<int16_t>(rounded);
-}
-
-void write_uint16_le(uint8_t *destination, uint16_t encoded) {
-  destination[0] = static_cast<uint8_t>(encoded & 0xFF);
-  destination[1] = static_cast<uint8_t>(encoded >> 8);
-}
-
-void build_packet(uint8_t packet[PACKET_SIZE]) {
-  memset(packet, 0, PACKET_SIZE);
-  packet[0] = PROTOCOL_VERSION;
-
-  if (scan_ready) {
-    packet[1] = 1;
-    if (isfinite(published_maximum) && published_maximum > TEMP_THRESHOLD) {
-      packet[1] |= 1 << 1;
-    }
-  }
-
-  packet[3] = published_hottest_channel < 0
-                  ? 0xFF
-                  : static_cast<uint8_t>(published_hottest_channel);
-  write_uint16_le(packet + 4, scan_sequence);
-  write_uint16_le(packet + 6, static_cast<uint16_t>(
-                                   encode_temperature(published_maximum)));
-  for (int channel = 0; channel < NUM_SENSORS; ++channel) {
-    const int16_t temperature =
-        scan_ready ? encode_temperature(channel_temperatures[channel])
-                   : UNAVAILABLE_TEMPERATURE;
-    write_uint16_le(packet + 8 + channel * 2,
-                   static_cast<uint16_t>(temperature));
-  }
-}
-
-void report_i2c(const float temperatures[NUM_SENSORS], float maximum) {
-  (void)temperatures;
-  (void)maximum;
-  uint8_t packet[PACKET_SIZE];
-  build_packet(packet);
-#if defined(__AVR__)
-  const uint8_t interrupt_state = SREG;
-  cli();
-  memcpy(const_cast<uint8_t *>(published_packet), packet, PACKET_SIZE);
-  SREG = interrupt_state;
-#else
-  noInterrupts();
-  memcpy(const_cast<uint8_t *>(published_packet), packet, PACKET_SIZE);
-  interrupts();
-#endif
-}
-
-void on_i2c_request(void) {
-  Wire.write(const_cast<const uint8_t *>(published_packet), PACKET_SIZE);
-}
-
-void update_fault_led(float maximum) {
-  const bool fault = scan_ready &&
-                     isfinite(maximum) && maximum > TEMP_THRESHOLD;
-  if (!fault) {
-    led_state = false;
-    digitalWrite(FAULT_LED_PIN, LOW);
-    return;
-  }
-
-  const unsigned long now = millis();
-  if (now - last_led_toggle_ms >= LED_BLINK_INTERVAL_MS) {
-    last_led_toggle_ms = now;
-    led_state = !led_state;
-    digitalWrite(FAULT_LED_PIN, led_state ? HIGH : LOW);
-  }
-}
-
-void print_voltage(float volts) {
-  if (isfinite(volts)) {
-    Serial.print(volts, 3);
-    Serial.print(F("V"));
-  } else {
-    Serial.print(F("INVALID"));
-  }
-}
-
-void print_scan(void) {
-  const bool overtemperature =
-      isfinite(published_maximum) && published_maximum > TEMP_THRESHOLD;
-  Serial.print(F("scan="));
-  Serial.print(scan_sequence);
-  Serial.print(F(" status="));
-  if (!scan_ready) {
-    Serial.print(F("NOT_READY"));
-  } else {
-    if (overtemperature) Serial.print(F("OVERTEMP "));
-    if (!overtemperature) Serial.print(F("OK"));
-  }
-  Serial.print(F(" max="));
-  if (isfinite(published_maximum)) {
-    Serial.print(published_maximum, 2);
-    Serial.print(F("C ch="));
-    Serial.print(published_hottest_channel);
-  } else {
-    Serial.print(F("N/A"));
-  }
-  Serial.println();
-
-  // Per channel: raw ADC count, A0 pin voltage, reconstructed sensor voltage, temperature
-  for (int channel = 0; channel < NUM_SENSORS; ++channel) {
-    Serial.print(F("  ch"));
-    Serial.print(channel);
-    Serial.print(F(" adc="));
-    Serial.print(raw_adc[channel]);
-    Serial.print(F(" A0="));
-    print_voltage(a0_voltages[channel]);
-    Serial.print(F(" Vsensor="));
-    print_voltage(sensor_voltages[channel]);
-    Serial.print(F(" temp="));
-    if (isfinite(channel_temperatures[channel])) {
-      Serial.print(channel_temperatures[channel], 2);
-      Serial.println(F("C"));
-    } else {
-      Serial.println(F("N/A"));
-    }
-  }
-}
-
-void initialize_peripherals(void) {
-  for (uint8_t bit = 0; bit < 3; ++bit) {
-    pinMode(MUX_SELECT_PINS[bit], OUTPUT);
-    digitalWrite(MUX_SELECT_PINS[bit], LOW);
-  }
-  pinMode(FAULT_LED_PIN, OUTPUT);
-  digitalWrite(FAULT_LED_PIN, LOW);
+  pinMode(ledPin, OUTPUT);
   analogReference(DEFAULT);
-  Serial.begin(SERIAL_BAUD_RATE);
-  Wire.begin(I2C_ADDRESS);
-  Wire.onRequest(on_i2c_request);
-
-  for (int channel = 0; channel < NUM_SENSORS; ++channel) {
-    raw_adc[channel] = 0;
-    a0_voltages[channel] = NAN;
-    sensor_voltages[channel] = NAN;
-    channel_temperatures[channel] = NAN;
-  }
-  Serial.println(F("RFR 8-channel scanner"));
-  Serial.println(F("Provisional pins: mux S0/S1/S2=D2/D3/D4, ADC=A0, LED=D6"));
-  Serial.print(F("ADC ref="));
-  Serial.print(ADC_REFERENCE_VOLTAGE, 3);
-  Serial.print(F("V V+="));
-  Serial.print(V_PLUS_VOLTAGE, 3);
-  Serial.print(F("V model: Vsensor="));
-  Serial.print(SENSOR_VOLTAGE_OFFSET, 4);
-  Serial.print(F(" - "));
-  Serial.print(SENSOR_VOLTAGE_SLOPE, 4);
-  Serial.println(F("*VA0"));
-  Serial.println(F("Settling=2000us, I2C=0x08, packet=24 bytes"));
+  Serial.begin(115200);
+  Wire.begin(0x08);
+  Wire.onRequest(sendReply);
 }
 
-void setup(void) {
-  initialize_peripherals();
-}
+void loop() {
+  float highest = NAN;
+  uint8_t hottestChannel = 0xFF;
 
-void loop(void) {
-  scan_temperatures(channel_temperatures);
-  published_maximum = NAN;
-  published_hottest_channel = -1;
-  for (int channel = 0; channel < NUM_SENSORS; ++channel) {
-    if (!isfinite(channel_temperatures[channel])) {
-      continue;
+  for (uint8_t channel = 0; channel < NUM_SENSORS; ++channel) {
+    for (uint8_t bit = 0; bit < 3; ++bit) {
+      digitalWrite(muxPins[bit], (channel >> bit) & 1);
     }
-    if (!isfinite(published_maximum) ||
-        channel_temperatures[channel] > published_maximum) {
-      published_maximum = channel_temperatures[channel];
-      published_hottest_channel = channel;
+    delay(2);
+
+    const float a0 = analogRead(A0) * adcReference / 1023.0f;
+    // As-built design report: undo the amplifier gain and mux voltage drop.
+    const float diodeVoltage = 0.43824f * adcReference - 0.28735f * a0;
+    const float temperature = voltage_to_temperature(diodeVoltage);
+
+    Serial.print(channel);
+    Serial.print(F(": "));
+    Serial.println(temperature);
+
+    if (isfinite(temperature) && (!isfinite(highest) || temperature > highest)) {
+      highest = temperature;
+      hottestChannel = channel;
     }
   }
-  scan_ready = true;
-  ++scan_sequence;
-  report_i2c(channel_temperatures, published_maximum);
 
-  update_fault_led(published_maximum);
-  const unsigned long now = millis();
-  if (now - last_serial_report_ms >= SERIAL_REPORT_INTERVAL_MS) {
-    last_serial_report_ms = now;
-    print_scan();
-  }
+  const bool overtemperature = highest > TEMP_THRESHOLD;
+  const uint16_t encoded = isfinite(highest)
+      ? static_cast<uint16_t>(lroundf(highest * 100.0f))
+      : 0x8000;
+  reply[0] = overtemperature;
+  reply[1] = overtemperature ? hottestChannel : 0xFF;
+  reply[2] = encoded & 0xFF;
+  reply[3] = encoded >> 8;
+
+  digitalWrite(ledPin, overtemperature && (millis() / 250 % 2));
 }
