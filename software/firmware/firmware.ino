@@ -62,7 +62,7 @@ void setup() {
   pinMode(ledPin, OUTPUT);
   analogReference(DEFAULT);
   Serial.begin(115200);
-  Wire.begin(0x08);
+  Wire.begin(0x08);  // I2C slave address: 0x08 (lowest)
   Wire.onRequest(sendReply);
 }
 
@@ -76,8 +76,10 @@ void loop() {
     }
     delay(2);
 
+    // map 0-1023 ADC value to voltage @ pin A0
     const float a0 = analogRead(A0) * adcReference / 1023.0f;
-    // As-built design report: undo the amplifier gain and mux voltage drop.
+
+    // formula to convert voltage at pin A0 to voltage of diode (see design report hand calcs)
     const float diodeVoltage = 0.43824f * adcReference - 0.28735f * a0;
     const float temperature = voltage_to_temperature(diodeVoltage);
 
