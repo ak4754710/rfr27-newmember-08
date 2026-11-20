@@ -6,7 +6,9 @@
 const uint8_t muxPins[] = {2, 3, 4};
 const uint8_t ledPin = 6;
 const float adcReference = 4.84f; // measure voltage of ADC reference with multimeter and set here
-volatile uint8_t reply[] = {0, 0xFF, 0, 0x80};
+
+const int8_t TEMP_INVALID = -128;           // 0x80, means "no valid reading"
+volatile uint8_t reply[] = {0, 0xFF, 0x80}; // {fault, hottest channel, temp}
 
 const float SENSOR_TEMPERATURES_C[] = {
     -40.0f, -35.0f, -30.0f, -25.0f, -20.0f, -15.0f, -10.0f, -5.0f,
@@ -54,7 +56,7 @@ float voltage_to_temperature(float voltage)
 
 void sendReply()
 {
-  const uint8_t packet[] = {reply[0], reply[1], reply[2], reply[3]};
+  const uint8_t packet[] = {reply[0], reply[1], reply[2]};
   Wire.write(packet, sizeof(packet));
 }
 
@@ -104,17 +106,30 @@ void loop()
   }
 
   const bool overtemperature = highest > TEMP_THRESHOLD;
-  const uint16_t encoded = isfinite(highest)
-                               ? static_cast<uint16_t>(lroundf(highest * 100.0f))
-                               : 0x8000;
+
+  // 1 C per LSB, signed 8-bit (two's complement), clamped to -127..127
+  int8_t encoded = TEMP_INVALID;
+  if (isfinite(highest))
+  {
+    long rounded = lroundf(highest);
+    if (rounded > 127)
+      rounded = 127;
+    if (rounded < -127)
+      rounded = -127;
+    encoded = static_cast<int8_t>(rounded);
+  }
+
+  // update all bytes together so an I2C request can't read a half-updated packet
+  noInterrupts();
   reply[0] = overtemperature;
   reply[1] = overtemperature ? hottestChannel : 0xFF;
-  reply[2] = encoded & 0xFF;
-  reply[3] = encoded >> 8;
-  // I2C Response format:
-  //    Byte 1: fault status (1 = true, 0 = false)
-  //    Byte 2: index of the hottest channel (0xFF if fault status=0)
-  //    Byte 3: 
+  reply[2] = static_cast<uint8_t>(encoded);
+  interrupts();
+
+  // I2C Response format (3 bytes):
+  //    Byte 0: fault status (1 = over threshold, 0 = OK)
+  //    Byte 1: index of the hottest channel (0xFF if fault status = 0)
+  //    Byte 2: hottest temperature, signed int8, 1 C/LSB (0x80 = no valid reading)
 
   digitalWrite(ledPin, overtemperature && (millis() / 250 % 2));
 }
