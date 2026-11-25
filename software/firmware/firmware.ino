@@ -85,7 +85,7 @@ void loop()
     {
       digitalWrite(muxPins[bit], (channel >> bit) & 1);
     }
-    delay(2);
+    delay(1500); // settling time
 
     // map 0-1023 ADC value to voltage @ pin A0
     const float a0 = analogRead(A0) * adcReference / 1023.0f;
